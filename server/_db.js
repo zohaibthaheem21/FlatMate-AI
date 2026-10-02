@@ -17,13 +17,12 @@ neonConfig.fetchOptions = {
 
 let cachedSql = null;
 
+const DEFAULT_DB_URL = 'postgresql://neondb_owner:npg_oN0lRhJ2zank@ep-rough-truth-b5j6kb9l.c-7.us-east-2.aws.neon.tech/neondb?sslmode=require';
+
 export function getDb() {
   if (cachedSql) return cachedSql;
 
-  let connectionString = process.env.DATABASE_URL;
-  if (!connectionString) {
-    throw new Error('DATABASE_URL environment variable is missing.');
-  }
+  let connectionString = process.env.DATABASE_URL || DEFAULT_DB_URL;
 
   // Optimize HTTP Serverless connection by pointing to the primary Neon endpoint (removing -pooler)
   // which eliminates PgBouncer HTTP queueing latencies and connection timeouts
