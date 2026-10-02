@@ -123,6 +123,15 @@ export const AuthProvider = ({ children }) => {
     return () => clearInterval(timer);
   }, [user?.flat_id, user?.id, refreshMembers, refreshPendingApprovalsCount, syncSession]);
 
+async function safeJsonResponse(res) {
+  const text = await res.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { error: text.slice(0, 150) || `Server error (${res.status})` };
+  }
+}
+
   const registerUser = async (name, phone, password) => {
     setLoading(true);
     try {
@@ -131,7 +140,7 @@ export const AuthProvider = ({ children }) => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name, phone, password }),
       });
-      const data = await res.json();
+      const data = await safeJsonResponse(res);
 
       if (!res.ok || !data.success) {
         throw new Error(data.error || 'Registration failed. Please try again.');

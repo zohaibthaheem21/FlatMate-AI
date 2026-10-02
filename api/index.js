@@ -1,4 +1,5 @@
 import { getDb } from '../server/_db.js';
+import { ensureDbInitialized } from '../server/init-db.js';
 import aiHandler from '../server/ai.js';
 import expensesHandler from '../server/expenses.js';
 import approvalsHandler from '../server/approvals.js';
@@ -12,12 +13,60 @@ import joinFlatHandler from '../server/flats/join.js';
 import leaveFlatHandler from '../server/flats/leave.js';
 import membersFlatHandler from '../server/flats/members.js';
 
-// Master Single Vercel Serverless Function (1 of 12 limit)
+async function parseJsonBody(req) {
+  if (req.body && Object.keys(req.body).length > 0) return req.body;
+  if (req.method === 'GET' || req.method === 'HEAD') return {};
+  
+  return new Promise((resolve) => {
+    let bodyData = '';
+    req.on('data', chunk => {
+      bodyData += chunk.toString();
+    });
+    req.on('end', () => {
+      try {
+        resolve(bodyData ? JSON.parse(bodyData) : {});
+      } catch {
+        resolve({});
+      }
+    });
+    req.on('error', () => resolve({}));
+  });
+}
+
+// Master Single Vercel Serverless Entry Function
 export default async function handler(req, res) {
-  const urlObj = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  const host = req.headers.host || 'localhost';
+  const urlObj = new URL(req.url, `http://${host}`);
   const pathname = urlObj.pathname;
 
+  // Add query helper if missing
+  req.query = req.query || Object.fromEntries(urlObj.searchParams.entries());
+
+  // Add response helpers if missing
+  if (!res.status) {
+    res.status = function(code) {
+      res.statusCode = code;
+      return res;
+    };
+  }
+  if (!res.json) {
+    res.json = function(data) {
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify(data));
+      return res;
+    };
+  }
+
   try {
+    // Parse body if stream
+    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
+      req.body = await parseJsonBody(req);
+    }
+
+    // Auto initialize DB tables if needed
+    await ensureDbInitialized();
+
+    // Route to sub-handlers
     if (pathname.startsWith('/api/ai')) {
       return await aiHandler(req, res);
     } else if (pathname.startsWith('/api/expenses')) {
@@ -47,6 +96,7 @@ export default async function handler(req, res) {
     }
   } catch (error) {
     console.error('Master Serverless Error:', error);
-    return res.status(500).json({ error: error.message || 'Server error' });
+    res.setHeader('Content-Type', 'application/json');
+    return res.status(500).json({ error: error.message || 'Server error occurred' });
   }
 }
