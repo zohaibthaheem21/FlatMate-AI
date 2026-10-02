@@ -854,7 +854,7 @@ async function handleAI(req, res) {
     SELECT u.id, u.name, u.user_code FROM flat_members fm JOIN users u ON fm.user_id = u.id WHERE fm.flat_id = ${flatId}
   `;
   const splits = await sql`
-    SELECT es.*, u.name as user_name FROM expense_splits es JOIN expenses e ON es.expense_id = e.id JOIN users u ON es.user_id = u.id
+    SELECT es.*, e.paid_by, u.name as user_name FROM expense_splits es JOIN expenses e ON es.expense_id = e.id JOIN users u ON es.user_id = u.id
     WHERE e.flat_id = ${flatId}
   `;
   const settlements = await sql`
@@ -913,6 +913,7 @@ async function handleAI(req, res) {
 
   // Add splits: Payer +shareAmt, Borrower -shareAmt
   splits.forEach(s => {
+    if (s.status === 'rejected') return;
     const payerId = parseInt(s.paid_by);
     const borrowerId = parseInt(s.user_id);
     const shareAmt = parseFloat(s.amount || 0);
@@ -943,23 +944,25 @@ async function handleAI(req, res) {
   Object.entries(balances).forEach(([idStr, bal]) => {
     const uid = parseInt(idStr);
     const rounded = Math.round(bal * 100) / 100;
-    if (rounded < -0.5) debtors.push({ id: uid, name: memberMap[uid] || `User #${uid}`, amount: -rounded });
-    else if (rounded > 0.5) creditors.push({ id: uid, name: memberMap[uid] || `User #${uid}`, amount: rounded });
+    if (rounded < -0.01) debtors.push({ id: uid, name: memberMap[uid] || `User #${uid}`, amount: -rounded });
+    else if (rounded > 0.01) creditors.push({ id: uid, name: memberMap[uid] || `User #${uid}`, amount: rounded });
   });
 
   const optimalTransfers = [];
   let i = 0, j = 0;
   while (i < debtors.length && j < creditors.length) {
     const transfer = Math.min(debtors[i].amount, creditors[j].amount);
-    optimalTransfers.push({
-      fromId: debtors[i].id, fromName: debtors[i].name,
-      toId: creditors[j].id, toName: creditors[j].name,
-      amount: Math.round(transfer * 100) / 100
-    });
+    if (transfer >= 0.01) {
+      optimalTransfers.push({
+        fromId: debtors[i].id, fromName: debtors[i].name,
+        toId: creditors[j].id, toName: creditors[j].name,
+        amount: Math.round(transfer * 100) / 100
+      });
+    }
     debtors[i].amount -= transfer;
     creditors[j].amount -= transfer;
-    if (debtors[i].amount < 0.5) i++;
-    if (creditors[j].amount < 0.5) j++;
+    if (debtors[i].amount < 0.01) i++;
+    if (creditors[j].amount < 0.01) j++;
   }
 
   // 3. Budget Advisor Agent
