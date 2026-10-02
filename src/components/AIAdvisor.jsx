@@ -180,7 +180,10 @@ export default function AIAdvisor({ setActiveTab, onPrefillExpense }) {
   };
 
   const generateWhatsAppLink = (transfer) => {
-    const message = `*Flatmate AI Debt Reminder* 🏠\nHi ${transfer.toName}, according to Flatmate AI Debt Minimizer, settling PKR ${transfer.amount.toLocaleString()} clears flat balance.`;
+    const fromName = transfer.fromName || 'Roommate';
+    const toName = transfer.toName || 'Roommate';
+    const amtStr = (parseFloat(transfer.amount) || 0).toLocaleString();
+    const message = `*Flatmate AI Debt Reminder* 🏠\nHi ${fromName}, according to Flatmate AI Debt Minimizer, please settle PKR ${amtStr} to ${toName} to clear flat balance.`;
     return `https://wa.me/?text=${encodeURIComponent(message)}`;
   };
 
