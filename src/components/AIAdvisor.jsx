@@ -122,25 +122,40 @@ export default function AIAdvisor({ setActiveTab, onPrefillExpense }) {
 
     setScanning(true);
     try {
+      let extractedText = receiptText;
+
+      if (receiptImage && !extractedText.trim()) {
+        try {
+          showToast('Scanning image text via GenAI OCR...', 'info');
+          const { recognize } = await import('tesseract.js');
+          const ocrRes = await recognize(receiptImage, 'eng');
+          extractedText = ocrRes.data?.text || '';
+        } catch (ocrErr) {
+          console.warn('Client OCR error:', ocrErr);
+        }
+      }
+
       const res = await fetch('/api/ai?action=scan-receipt', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          textContent: receiptText,
+          textContent: extractedText,
           imageBase64: receiptImage
         })
       });
       const data = await res.json();
       if (data.success && data.parsed) {
-        showToast('Receipt scanned & parsed by AI!', 'success');
+        showToast(`Receipt parsed: ${data.parsed.title} (PKR ${data.parsed.amount})`, 'success');
         setShowScannerModal(false);
         if (onPrefillExpense) {
           onPrefillExpense(data.parsed);
         }
         setActiveTab('add-expense');
+      } else {
+        throw new Error(data.error || 'Receipt parsing failed');
       }
     } catch (err) {
-      showToast('Receipt scanning failed', 'error');
+      showToast(err.message || 'Receipt scanning failed', 'error');
     } finally {
       setScanning(false);
     }

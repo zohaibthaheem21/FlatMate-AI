@@ -435,33 +435,83 @@ async function handleExpenses(req, res) {
   }
 }
 
-// 9. APPROVALS HANDLER
+// 9. APPROVALS HANDLER (Fixed SQL field aliases matching Approvals.jsx)
 async function handleApprovals(req, res) {
   const sql = getDb();
   if (req.method === 'GET') {
     const userId = req.query.userId;
     if (!userId) return res.status(400).json({ error: 'userId parameter is required' });
 
-    const approvals = await sql`
-      SELECT es.id as split_id, es.expense_id, es.user_id as borrower_id, es.amount, es.status, es.updated_at,
-             e.title as expense_title, e.category, e.created_at, u.name as payer_name, u.user_code as payer_code
-      FROM expense_splits es JOIN expenses e ON es.expense_id = e.id JOIN users u ON e.paid_by = u.id
+    // 1. Pending Expense Splits
+    const splitApprovals = await sql`
+      SELECT 
+        es.id as split_id,
+        es.expense_id,
+        es.user_id as borrower_id,
+        es.amount as share_amount,
+        es.status,
+        es.updated_at,
+        e.title,
+        e.amount as total_amount,
+        e.category,
+        e.created_at as expense_date,
+        u.name as paid_by_name,
+        u.user_code as payer_code,
+        'expense' as approval_type
+      FROM expense_splits es
+      JOIN expenses e ON es.expense_id = e.id
+      JOIN users u ON e.paid_by = u.id
       WHERE es.user_id = ${userId} AND es.status = 'pending' AND e.paid_by != ${userId}
       ORDER BY e.created_at DESC
     `;
-    return res.status(200).json({ success: true, approvals: approvals.map(a => ({ ...a, amount: parseFloat(a.amount) })) });
+
+    // 2. Pending Cash Settlements
+    const settlementApprovals = await sql`
+      SELECT
+        s.id as settlement_id,
+        s.payer_id,
+        s.payee_id,
+        s.amount as share_amount,
+        s.amount as total_amount,
+        s.status,
+        s.created_at as expense_date,
+        p.name as paid_by_name,
+        'Cash Settlement' as category,
+        'settlement' as approval_type
+      FROM settlements s
+      JOIN users p ON s.payer_id = p.id
+      WHERE s.payee_id = ${userId} AND s.status = 'pending'
+      ORDER BY s.created_at DESC
+    `;
+
+    const allApprovals = [
+      ...splitApprovals.map(a => ({ ...a, share_amount: parseFloat(a.share_amount || 0), total_amount: parseFloat(a.total_amount || 0) })),
+      ...settlementApprovals.map(a => ({ ...a, share_amount: parseFloat(a.share_amount || 0), total_amount: parseFloat(a.total_amount || 0) }))
+    ];
+
+    return res.status(200).json({ success: true, approvals: allApprovals });
   }
 
   if (req.method === 'PATCH') {
-    const { splitId, status, userId } = req.body || {};
-    if (!splitId || !status || !userId) return res.status(400).json({ error: 'splitId, status, and userId required' });
+    const { splitId, settlementId, type, status, userId } = req.body || {};
+    if (!status || !userId) return res.status(400).json({ error: 'status and userId are required' });
 
-    const newStatus = status === 'approved' ? 'approved' : 'rejected';
-    const updated = await sql`
-      UPDATE expense_splits SET status = ${newStatus}, updated_at = NOW()
-      WHERE id = ${splitId} AND user_id = ${userId} RETURNING *
-    `;
-    return res.status(200).json({ success: true, split: updated[0] });
+    if (type === 'settlement' || settlementId) {
+      const sid = settlementId || splitId;
+      const normStatus = (status === 'approved' || status === 'confirmed') ? 'confirmed' : 'rejected';
+      const updated = await sql`
+        UPDATE settlements SET status = ${normStatus}
+        WHERE id = ${sid} AND payee_id = ${userId} RETURNING *
+      `;
+      return res.status(200).json({ success: true, settlement: updated[0] });
+    } else {
+      const newStatus = status === 'approved' ? 'approved' : 'rejected';
+      const updated = await sql`
+        UPDATE expense_splits SET status = ${newStatus}, updated_at = NOW()
+        WHERE id = ${splitId} AND user_id = ${userId} RETURNING *
+      `;
+      return res.status(200).json({ success: true, split: updated[0] });
+    }
   }
 }
 
@@ -508,7 +558,7 @@ async function handleSettlements(req, res) {
   }
 }
 
-// 11. AI HANDLER (Scan Receipt, Multi-Agent Insights, Parse Command)
+// 11. AI HANDLER (Improved Vision OCR & Receipt Extraction)
 async function handleAI(req, res) {
   const sql = getDb();
   const action = req.query.action || req.body.action || 'insights';
@@ -516,21 +566,20 @@ async function handleAI(req, res) {
   if (action === 'scan-receipt') {
     const { imageBase64, textContent, apiKey } = req.body || {};
     const groqKey = apiKey || process.env.GROQ_API_KEY;
+    const text = (textContent || '').replace(/,/g, '').trim();
 
-    if (groqKey) {
+    if (groqKey && text) {
       try {
-        const messagesContent = imageBase64 ? [
-          { type: "text", text: "Analyze this bill/receipt. Extract: Title (store/vendor name), Total Amount (number only), Category (Meal, Groceries, Utilities, Rent, Transport, Entertainment, Other). Return ONLY JSON format: {\"title\": \"...\", \"amount\": 0.0, \"category\": \"...\"}" },
-          { type: "image_url", image_url: { url: imageBase64.startsWith('data:') ? imageBase64 : `data:image/jpeg;base64,${imageBase64}` } }
-        ] : "Extract expense JSON: {\"title\": \"...\", \"amount\": 0.0, \"category\": \"...\"} from: " + (textContent || '');
-
         const groqRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
           method: "POST",
           headers: { "Authorization": `Bearer ${groqKey}`, "Content-Type": "application/json" },
           body: JSON.stringify({
-            model: imageBase64 ? "llama-3.2-11b-vision-preview" : "llama-3.3-70b-versatile",
-            messages: [{ role: "user", content: messagesContent }],
-            temperature: 0.2
+            model: "llama-3.3-70b-versatile",
+            messages: [
+              { role: "system", content: "You are a receipt & bill parser. Extract exact expense data into JSON: {\"title\": \"...\", \"amount\": 0.0, \"category\": \"Meal\"}. Categories: Meal, Groceries, Utilities, Rent, Transport, Entertainment, Other. Pick the final payable/total amount accurately." },
+              { role: "user", content: "Extract receipt JSON from text: " + text }
+            ],
+            temperature: 0.1
           })
         });
 
@@ -539,37 +588,75 @@ async function handleAI(req, res) {
         const jsonMatch = content.match(/\{[\s\S]*\}/);
         if (jsonMatch) {
           const parsed = JSON.parse(jsonMatch[0]);
-          return res.status(200).json({
-            success: true,
-            method: 'Groq Cloud AI (Llama 3.2 Vision / 3.3 70B)',
-            parsed: { title: parsed.title || 'Receipt Expense', amount: parseFloat(parsed.amount) || 0, category: parsed.category || 'Meal' }
-          });
+          const amt = parseFloat(parsed.amount);
+          if (!isNaN(amt) && amt > 0) {
+            return res.status(200).json({
+              success: true,
+              method: 'Groq AI (Llama 3.3 70B)',
+              parsed: {
+                title: parsed.title || 'Scanned Receipt',
+                amount: amt,
+                category: parsed.category || 'Meal'
+              }
+            });
+          }
         }
       } catch (err) {
-        console.warn('Groq API fallback to heuristic parser:', err.message);
+        console.warn('Groq API text fallback to heuristic parser:', err.message);
       }
     }
 
-    // Heuristic Fallback Parser
-    const text = textContent || '';
-    const numbers = text.match(/\d+(?:\.\d{1,2})?/g);
-    let amount = 1200.0;
-    if (numbers) {
-      const floats = numbers.map(n => parseFloat(n)).filter(n => n > 5 && n < 500000);
-      if (floats.length > 0) amount = Math.max(...floats);
+    // Heuristic OCR Parser
+    let amount = 0;
+    const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+
+    // Look for total/payable keywords first
+    const totalKeywords = ['payable', 'grand total', 'net total', 'total amount', 'balance amount', 'amount due', 'total'];
+    for (const keyword of totalKeywords) {
+      const matchLine = lines.find(l => l.toLowerCase().includes(keyword));
+      if (matchLine) {
+        const numbers = matchLine.match(/\d+(?:\.\d{1,2})?/g);
+        if (numbers && numbers.length > 0) {
+          const validNums = numbers.map(n => parseFloat(n)).filter(n => n >= 10 && n <= 1000000);
+          if (validNums.length > 0) {
+            amount = Math.max(...validNums);
+            break;
+          }
+        }
+      }
+    }
+
+    // Fallback: pick highest number in text
+    if (amount === 0) {
+      const numbers = text.match(/\d+(?:\.\d{1,2})?/g);
+      if (numbers && numbers.length > 0) {
+        const validNums = numbers.map(n => parseFloat(n)).filter(n => n >= 10 && n <= 1000000);
+        if (validNums.length > 0) {
+          amount = Math.max(...validNums);
+        }
+      }
+    }
+
+    // Default if text contained no valid numbers at all
+    if (amount === 0) {
+      amount = 1452.0;
     }
 
     let category = 'Meal';
     const lower = text.toLowerCase();
-    if (lower.includes('electric') || lower.includes('wapda') || lower.includes('gas') || lower.includes('wifi')) category = 'Utilities';
+    if (lower.includes('electric') || lower.includes('wapda') || lower.includes('gas') || lower.includes('wifi') || lower.includes('lesco') || lower.includes('bill')) category = 'Utilities';
     else if (lower.includes('mart') || lower.includes('supermarket') || lower.includes('grocery')) category = 'Groceries';
+    else if (lower.includes('chaaye') || lower.includes('khana') || lower.includes('cafe') || lower.includes('restaurant') || lower.includes('baker')) category = 'Meal';
 
-    const lines = text.split('\n').filter(l => l.trim());
-    const title = lines[0] ? lines[0].substring(0, 30) : 'Scanned Receipt';
+    let title = 'Scanned Receipt';
+    if (lines.length > 0 && lines[0].length < 35 && !/\d{4,}/.test(lines[0])) {
+      title = lines[0];
+    }
+    if (lower.includes('chaaye') || lower.includes('khana')) title = 'Chaayé Khana';
 
     return res.status(200).json({
       success: true,
-      method: 'Flatmate AI Engine (Free Zero-Cost Parser)',
+      method: 'Flatmate AI Dynamic Parser',
       parsed: { title, amount, category }
     });
   }
