@@ -63,7 +63,7 @@ function vercelApiDevPlugin() {
           };
 
           // Load serverless function module dynamically
-          const apiModulePath = `/api${routePath}.js`;
+          const apiModulePath = `/api/index.js`;
           const handlerModule = await server.ssrLoadModule(apiModulePath);
           const handler = handlerModule.default;
 
