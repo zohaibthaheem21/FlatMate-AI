@@ -1,22 +1,24 @@
-import { getDb } from '../server/_db.js';
-import { ensureDbInitialized } from '../server/init-db.js';
-import aiHandler from '../server/ai.js';
-import expensesHandler from '../server/expenses.js';
-import approvalsHandler from '../server/approvals.js';
-import settleHandler from '../server/settle.js';
-import initDbHandler from '../server/init-db.js';
-import loginHandler from '../server/auth/login.js';
-import registerHandler from '../server/auth/register.js';
-import meHandler from '../server/auth/me.js';
-import createFlatHandler from '../server/flats/create.js';
-import joinFlatHandler from '../server/flats/join.js';
-import leaveFlatHandler from '../server/flats/leave.js';
-import membersFlatHandler from '../server/flats/members.js';
+import { getDb } from './lib/_db.js';
+import { ensureDbInitialized } from './lib/init-db.js';
+import aiHandler from './lib/ai.js';
+import expensesHandler from './lib/expenses.js';
+import approvalsHandler from './lib/approvals.js';
+import settleHandler from './lib/settle.js';
+import initDbHandler from './lib/init-db.js';
+import loginHandler from './lib/auth/login.js';
+import registerHandler from './lib/auth/register.js';
+import meHandler from './lib/auth/me.js';
+import createFlatHandler from './lib/flats/create.js';
+import joinFlatHandler from './lib/flats/join.js';
+import leaveFlatHandler from './lib/flats/leave.js';
+import membersFlatHandler from './lib/flats/members.js';
 
 async function parseJsonBody(req) {
-  if (req.body && Object.keys(req.body).length > 0) return req.body;
+  if (req.body && typeof req.body === 'object' && Object.keys(req.body).length > 0) {
+    return req.body;
+  }
   if (req.method === 'GET' || req.method === 'HEAD') return {};
-  
+
   return new Promise((resolve) => {
     let bodyData = '';
     req.on('data', chunk => {
@@ -33,7 +35,7 @@ async function parseJsonBody(req) {
   });
 }
 
-// Master Single Vercel Serverless Entry Function
+// Master Single Vercel Serverless Function
 export default async function handler(req, res) {
   const host = req.headers.host || 'localhost';
   const urlObj = new URL(req.url, `http://${host}`);
