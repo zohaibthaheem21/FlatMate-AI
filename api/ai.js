@@ -23,15 +23,57 @@ export default async function handler(req, res) {
   }
 }
 
-// 1. FREE-OF-COST RECEIPT & BILL SCANNER (OCR & Smart Heuristic Parser)
+// 1. FREE-OF-COST RECEIPT & BILL SCANNER (Groq AI / Gemini / Smart Heuristic Parser)
 async function handleScanReceipt(req, res) {
   const { imageBase64, textContent, apiKey } = req.body;
 
   let rawText = textContent || '';
   
-  // If textContent is empty, attempt optional Gemini API call if key exists, otherwise extract from base64 string mock/canvas
-  const geminiKey = apiKey || process.env.GEMINI_API_KEY;
+  // 1. Try GROQ API (Llama 3.2 Vision / Llama 3.3 70B)
+  const groqKey = apiKey || process.env.GROQ_API_KEY;
 
+  if (groqKey) {
+    try {
+      const messagesContent = imageBase64 ? [
+        { type: "text", text: "Analyze this bill/receipt. Extract: Title (store/vendor name), Total Amount (number only), Category (Meal, Groceries, Utilities, Rent, Transport, Entertainment, Other). Return ONLY JSON format: {\"title\": \"...\", \"amount\": 0.0, \"category\": \"...\"}" },
+        { type: "image_url", image_url: { url: imageBase64.startsWith('data:') ? imageBase64 : `data:image/jpeg;base64,${imageBase64}` } }
+      ] : "Extract expense JSON: {\"title\": \"...\", \"amount\": 0.0, \"category\": \"...\"} from: " + rawText;
+
+      const groqRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${groqKey}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          model: imageBase64 ? "llama-3.2-11b-vision-preview" : "llama-3.3-70b-versatile",
+          messages: [{ role: "user", content: messagesContent }],
+          temperature: 0.2
+        })
+      });
+
+      const groqData = await groqRes.json();
+      const content = groqData.choices?.[0]?.message?.content || "";
+      const jsonMatch = content.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        return res.status(200).json({
+          success: true,
+          method: 'Groq Cloud AI (Llama 3.2 Vision / 3.3 70B)',
+          parsed: {
+            title: parsed.title || 'Receipt Expense',
+            amount: parseFloat(parsed.amount) || 0,
+            category: parsed.category || 'Meal'
+          }
+        });
+      }
+    } catch (err) {
+      console.warn('Groq API fallback to heuristic parser:', err.message);
+    }
+  }
+
+  // 2. Try Gemini API if present
+  const geminiKey = process.env.GEMINI_API_KEY;
   if (geminiKey && imageBase64) {
     try {
       const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`, {
@@ -40,7 +82,7 @@ async function handleScanReceipt(req, res) {
         body: JSON.stringify({
           contents: [{
             parts: [
-              { text: "Analyze this bill/receipt image. Extract: Title (store/vendor name), Total Amount (number only), Category (Meal, Groceries, Utilities, Rent, Transport, Entertainment, Other), and list of Line Items. Return ONLY valid JSON format: {\"title\": \"...\", \"amount\": 0.0, \"category\": \"...\", \"items\": [\"...\"]}" },
+              { text: "Analyze this bill/receipt image. Extract Title, Amount, Category. Return JSON format: {\"title\": \"...\", \"amount\": 0.0, \"category\": \"...\"}" },
               { inline_data: { mime_type: "image/jpeg", data: imageBase64.replace(/^data:image\/\w+;base64,/, '') } }
             ]
           }]
@@ -57,7 +99,14 @@ async function handleScanReceipt(req, res) {
           parsed: {
             title: parsed.title || 'Receipt Expense',
             amount: parseFloat(parsed.amount) || 0,
-            category: parsed.category || 'Meal',
+            category: parsed.category || 'Meal'
+          }
+        });
+      }
+    } catch (e) {
+      console.warn('Gemini vision API fallback to smart heuristic parser:', e.message);
+    }
+  }
             items: parsed.items || []
           }
         });
@@ -364,20 +413,61 @@ function runBudgetAdvisorAgent(expenses) {
   };
 }
 
-// 3. NATURAL LANGUAGE / VOICE COMMAND PARSER
+// 3. NATURAL LANGUAGE / VOICE COMMAND PARSER (Groq AI Llama 3.3 70B & Fallback)
 async function handleParseCommand(req, res) {
-  const { command } = req.body;
+  const { command, apiKey } = req.body;
   if (!command) {
     return res.status(400).json({ error: 'Command text is required' });
   }
 
   const text = command.trim();
-  
-  // Extract number/amount
+  const groqKey = apiKey || process.env.GROQ_API_KEY;
+
+  if (groqKey) {
+    try {
+      const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${groqKey}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          model: "llama-3.3-70b-versatile",
+          messages: [
+            {
+              role: "system",
+              content: "You are an expense parser AI. Parse the input text into JSON: {\"title\": \"...\", \"amount\": 0.0, \"category\": \"Meal\" | \"Groceries\" | \"Utilities\" | \"Rent\" | \"Transport\" | \"Entertainment\" | \"Other\"}"
+            },
+            { role: "user", content: text }
+          ],
+          temperature: 0.1
+        })
+      });
+
+      const data = await response.json();
+      const content = data.choices?.[0]?.message?.content || "";
+      const jsonMatch = content.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        return res.status(200).json({
+          success: true,
+          method: 'Groq Cloud AI (Llama 3.3 70B)',
+          parsed: {
+            title: parsed.title || 'Expense',
+            amount: parseFloat(parsed.amount) || 0,
+            category: parsed.category || 'Meal'
+          }
+        });
+      }
+    } catch (e) {
+      console.warn('Groq command parser fallback:', e.message);
+    }
+  }
+
+  // Fallback regex extraction
   const amountMatch = text.match(/(\d+(?:\.\d{1,2})?)/);
   const amount = amountMatch ? parseFloat(amountMatch[1]) : 500;
 
-  // Extract category
   let category = 'Meal';
   const lower = text.toLowerCase();
   if (lower.includes('grocery') || lower.includes('mart') || lower.includes('vegetable') || lower.includes('milk')) category = 'Groceries';
@@ -385,12 +475,12 @@ async function handleParseCommand(req, res) {
   else if (lower.includes('rent')) category = 'Rent';
   else if (lower.includes('cab') || lower.includes('uber') || lower.includes('careem') || lower.includes('fuel')) category = 'Transport';
 
-  // Extract title
   let title = text.replace(/(\d+(?:\.\d{1,2})?)/, '').replace(/paid|for|rs|pkr|split|with|and|the/gi, ' ').replace(/\s+/g, ' ').trim();
   if (!title || title.length < 2) title = `${category} Expense`;
 
   return res.status(200).json({
     success: true,
+    method: 'Flatmate AI Engine (Free Heuristic Parser)',
     parsed: {
       title: title.charAt(0).toUpperCase() + title.slice(1),
       amount,
