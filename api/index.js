@@ -522,13 +522,122 @@ async function handleSettlements(req, res) {
     const flatId = req.query.flatId;
     if (!flatId) return res.status(400).json({ error: 'flatId parameter is required' });
 
+    // 1. Fetch flat members
+    const members = await sql`
+      SELECT u.id, u.name, u.user_code
+      FROM flat_members fm
+      JOIN users u ON fm.user_id = u.id
+      WHERE fm.flat_id = ${flatId}
+      ORDER BY u.name ASC
+    `;
+
+    // 2. Fetch all expenses for this flat
+    const expenses = await sql`
+      SELECT id, paid_by, amount FROM expenses WHERE flat_id = ${flatId}
+    `;
+
+    // 3. Fetch all splits for expenses in this flat
+    const expenseIds = expenses.map(e => e.id);
+    let splits = [];
+    if (expenseIds.length > 0) {
+      splits = await sql`
+        SELECT es.expense_id, es.user_id, es.amount, es.status, e.paid_by
+        FROM expense_splits es
+        JOIN expenses e ON es.expense_id = e.id
+        WHERE es.expense_id = ANY(${expenseIds})
+      `;
+    }
+
+    // 4. Fetch all cash settlements for this flat
     const settlements = await sql`
       SELECT s.id, s.flat_id, s.payer_id, s.payee_id, s.amount, s.status, s.created_at,
              p.name as payer_name, r.name as payee_name
-      FROM settlements s JOIN users p ON s.payer_id = p.id JOIN users r ON s.payee_id = r.id
-      WHERE s.flat_id = ${flatId} ORDER BY s.created_at DESC
+      FROM settlements s
+      JOIN users p ON s.payer_id = p.id
+      JOIN users r ON s.payee_id = r.id
+      WHERE s.flat_id = ${flatId}
+      ORDER BY s.created_at DESC
     `;
-    return res.status(200).json({ success: true, settlements: settlements.map(s => ({ ...s, amount: parseFloat(s.amount) })) });
+
+    // 5. Calculate net balance for each member
+    const netBalances = {};
+    members.forEach(m => { netBalances[m.id] = 0; });
+
+    // Add splits: Payer is credited (+shareAmount), Borrower is debited (-shareAmount)
+    splits.forEach(s => {
+      const payerId = parseInt(s.paid_by);
+      const borrowerId = parseInt(s.user_id);
+      const shareAmount = parseFloat(s.amount || 0);
+
+      if (payerId !== borrowerId) {
+        if (netBalances[payerId] !== undefined) netBalances[payerId] += shareAmount;
+        if (netBalances[borrowerId] !== undefined) netBalances[borrowerId] -= shareAmount;
+      }
+    });
+
+    // Add confirmed cash settlements: Cash Payer gets credited (+amount), Cash Payee gets debited (-amount)
+    settlements.forEach(s => {
+      if (s.status === 'confirmed' || s.status === 'approved') {
+        const payerId = parseInt(s.payer_id);
+        const payeeId = parseInt(s.payee_id);
+        const settleAmt = parseFloat(s.amount || 0);
+
+        if (netBalances[payerId] !== undefined) netBalances[payerId] += settleAmt;
+        if (netBalances[payeeId] !== undefined) netBalances[payeeId] -= settleAmt;
+      }
+    });
+
+    // Format balances list
+    const balances = members.map(m => ({
+      id: m.id,
+      name: m.name,
+      user_code: m.user_code,
+      net_balance: Math.round((netBalances[m.id] || 0) * 100) / 100
+    }));
+
+    // 6. Calculate Debt Minimizer / Pairwise simplified transactions
+    const debtors = [];
+    const creditors = [];
+
+    members.forEach(m => {
+      const bal = Math.round((netBalances[m.id] || 0) * 100) / 100;
+      if (bal < -0.01) {
+        debtors.push({ id: m.id, name: m.name, amount: Math.abs(bal) });
+      } else if (bal > 0.01) {
+        creditors.push({ id: m.id, name: m.name, amount: bal });
+      }
+    });
+
+    const transactions = [];
+    let i = 0, j = 0;
+    while (i < debtors.length && j < creditors.length) {
+      const transfer = Math.min(debtors[i].amount, creditors[j].amount);
+      transactions.push({
+        payer_id: debtors[i].id,
+        payer_name: debtors[i].name,
+        payee_id: creditors[j].id,
+        payee_name: creditors[j].name,
+        amount: Math.round(transfer * 100) / 100
+      });
+
+      debtors[i].amount -= transfer;
+      creditors[j].amount -= transfer;
+
+      if (debtors[i].amount < 0.01) i++;
+      if (creditors[j].amount < 0.01) j++;
+    }
+
+    const pendingSettlements = settlements.filter(s => s.status === 'pending').map(s => ({ ...s, amount: parseFloat(s.amount) }));
+    const history = settlements.filter(s => s.status === 'confirmed' || s.status === 'approved').map(s => ({ ...s, amount: parseFloat(s.amount) }));
+
+    return res.status(200).json({
+      success: true,
+      balances,
+      transactions,
+      pendingSettlements,
+      history,
+      settlements: settlements.map(s => ({ ...s, amount: parseFloat(s.amount) }))
+    });
   }
 
   if (req.method === 'POST') {
@@ -566,7 +675,8 @@ async function handleAI(req, res) {
   if (action === 'scan-receipt') {
     const { imageBase64, textContent, apiKey } = req.body || {};
     const groqKey = apiKey || process.env.GROQ_API_KEY;
-    const text = (textContent || '').replace(/,/g, '').trim();
+    let rawText = (textContent || '').trim();
+    let text = rawText.replace(/(\d+),(\d+)/g, '$1$2').replace(/(\d+)\s+(\d{3})\b/g, '$1$2');
 
     if (groqKey && text) {
       try {
@@ -611,13 +721,13 @@ async function handleAI(req, res) {
     const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
 
     // Look for total/payable keywords first
-    const totalKeywords = ['payable', 'grand total', 'net total', 'total amount', 'balance amount', 'amount due', 'total'];
+    const totalKeywords = ['payable', 'grand total', 'net total', 'total amount', 'balance amount', 'amount due', 'total', 'pkr', 'rs'];
     for (const keyword of totalKeywords) {
       const matchLine = lines.find(l => l.toLowerCase().includes(keyword));
       if (matchLine) {
         const numbers = matchLine.match(/\d+(?:\.\d{1,2})?/g);
         if (numbers && numbers.length > 0) {
-          const validNums = numbers.map(n => parseFloat(n)).filter(n => n >= 10 && n <= 1000000);
+          const validNums = numbers.map(n => parseFloat(n)).filter(n => n >= 10 && n <= 10000000);
           if (validNums.length > 0) {
             amount = Math.max(...validNums);
             break;
@@ -630,16 +740,11 @@ async function handleAI(req, res) {
     if (amount === 0) {
       const numbers = text.match(/\d+(?:\.\d{1,2})?/g);
       if (numbers && numbers.length > 0) {
-        const validNums = numbers.map(n => parseFloat(n)).filter(n => n >= 10 && n <= 1000000);
+        const validNums = numbers.map(n => parseFloat(n)).filter(n => n >= 10 && n <= 10000000);
         if (validNums.length > 0) {
           amount = Math.max(...validNums);
         }
       }
-    }
-
-    // Default if text contained no valid numbers at all
-    if (amount === 0) {
-      amount = 1452.0;
     }
 
     let category = 'Meal';
