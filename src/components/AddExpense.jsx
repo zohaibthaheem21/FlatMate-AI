@@ -32,7 +32,9 @@ export default function AddExpense({ setActiveTab, prefilledExpense, setPrefille
   useEffect(() => {
     if (prefilledExpense) {
       if (prefilledExpense.title) setTitle(prefilledExpense.title);
-      if (prefilledExpense.amount) setAmount(prefilledExpense.amount.toString());
+      if (prefilledExpense.amount !== undefined && prefilledExpense.amount !== null && prefilledExpense.amount !== '') {
+        setAmount(prefilledExpense.amount.toString());
+      }
       if (prefilledExpense.category) setCategory(prefilledExpense.category);
     }
   }, [prefilledExpense]);
