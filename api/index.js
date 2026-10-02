@@ -1,17 +1,17 @@
-import { getDb } from './lib/_db.js';
-import { ensureDbInitialized } from './lib/init-db.js';
-import aiHandler from './lib/ai.js';
-import expensesHandler from './lib/expenses.js';
-import approvalsHandler from './lib/approvals.js';
-import settleHandler from './lib/settle.js';
-import initDbHandler from './lib/init-db.js';
-import loginHandler from './lib/auth/login.js';
-import registerHandler from './lib/auth/register.js';
-import meHandler from './lib/auth/me.js';
-import createFlatHandler from './lib/flats/create.js';
-import joinFlatHandler from './lib/flats/join.js';
-import leaveFlatHandler from './lib/flats/leave.js';
-import membersFlatHandler from './lib/flats/members.js';
+import { getDb } from '../lib/_db.js';
+import { ensureDbInitialized } from '../lib/init-db.js';
+import aiHandler from '../lib/ai.js';
+import expensesHandler from '../lib/expenses.js';
+import approvalsHandler from '../lib/approvals.js';
+import settleHandler from '../lib/settle.js';
+import initDbHandler from '../lib/init-db.js';
+import loginHandler from '../lib/auth/login.js';
+import registerHandler from '../lib/auth/register.js';
+import meHandler from '../lib/auth/me.js';
+import createFlatHandler from '../lib/flats/create.js';
+import joinFlatHandler from '../lib/flats/join.js';
+import leaveFlatHandler from '../lib/flats/leave.js';
+import membersFlatHandler from '../lib/flats/members.js';
 
 async function parseJsonBody(req) {
   if (req.body && typeof req.body === 'object' && Object.keys(req.body).length > 0) {
@@ -35,7 +35,7 @@ async function parseJsonBody(req) {
   });
 }
 
-// Master Single Vercel Serverless Function
+// Master Single Vercel Serverless Function (1 of 12 limit)
 export default async function handler(req, res) {
   const host = req.headers.host || 'localhost';
   const urlObj = new URL(req.url, `http://${host}`);

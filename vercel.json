@@ -1,5 +1,10 @@
 {
   "framework": "vite",
+  "functions": {
+    "api/index.js": {
+      "includeFiles": "lib/**"
+    }
+  },
   "rewrites": [
     {
       "source": "/api/(.*)",
