@@ -58,9 +58,9 @@ export const AuthProvider = ({ children }) => {
       const data = await res.json();
       if (res.ok && data.success) {
         if (data.user) {
-          setUser(data.user);
+          setUser(prev => (JSON.stringify(prev) === JSON.stringify(data.user) ? prev : data.user));
         }
-        setFlat(data.flat || null);
+        setFlat(prev => (JSON.stringify(prev) === JSON.stringify(data.flat) ? prev : (data.flat || null)));
       }
     } catch (err) {
       console.error('Failed to sync session from backend:', err);

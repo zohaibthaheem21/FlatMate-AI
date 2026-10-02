@@ -833,27 +833,83 @@ async function handleAI(req, res) {
     SELECT es.*, u.name as user_name FROM expense_splits es JOIN expenses e ON es.expense_id = e.id JOIN users u ON es.user_id = u.id
     WHERE e.flat_id = ${flatId}
   `;
+  const settlements = await sql`
+    SELECT s.*, p.name as payer_name, r.name as payee_name FROM settlements s
+    JOIN users p ON s.payer_id = p.id JOIN users r ON s.payee_id = r.id
+    WHERE s.flat_id = ${flatId}
+  `;
 
-  // 1. Auditor Agent
+  // 1. Expense Auditor Agent
   const findings = [];
   let totalSpent = 0;
+  const payerTotals = {};
+
   expenses.forEach(e => {
     const amt = parseFloat(e.amount);
     totalSpent += amt;
-    if (amt > 15000) {
-      findings.push({ type: 'high_expense', severity: 'warning', title: 'High Expense Spike', description: `"${e.title}" by ${e.payer_name} is Rs ${amt.toLocaleString()}` });
+    payerTotals[e.paid_by] = (payerTotals[e.paid_by] || 0) + amt;
+
+    if (amt >= 5000) {
+      findings.push({
+        type: 'high_expense',
+        severity: 'warning',
+        title: 'High Expense Spike',
+        description: `"${e.title}" by ${e.payer_name} is PKR ${amt.toLocaleString()}`
+      });
     }
   });
 
-  if (findings.length === 0) {
-    findings.push({ type: 'clean', severity: 'success', title: 'All Clear!', description: 'No duplicate bills or expense anomalies detected.' });
+  // Single-member load imbalance (> 60% paid by 1 roommate)
+  if (totalSpent > 0) {
+    Object.entries(payerTotals).forEach(([uid, amt]) => {
+      if (amt / totalSpent > 0.6 && members.length > 1) {
+        const name = members.find(m => m.id === parseInt(uid))?.name || `User #${uid}`;
+        findings.push({
+          type: 'imbalance',
+          severity: 'warning',
+          title: 'Single Payer Imbalance',
+          description: `${name} has paid ${(amt / totalSpent * 100).toFixed(0)}% of total flat expenses.`
+        });
+      }
+    });
   }
 
-  // 2. Debt Minimizer Agent
+  if (findings.length === 0) {
+    findings.push({
+      type: 'clean',
+      severity: 'success',
+      title: 'All Clear!',
+      description: 'No duplicate bills or expense anomalies detected across flat expenses.'
+    });
+  }
+
+  // 2. Debt Minimizer Agent (Including Confirmed Settlements)
   const balances = {};
   members.forEach(m => { balances[m.id] = 0; });
-  expenses.forEach(e => { if (balances[e.paid_by] !== undefined) balances[e.paid_by] += parseFloat(e.amount); });
-  splits.forEach(s => { if (balances[s.user_id] !== undefined) balances[s.user_id] -= parseFloat(s.amount); });
+
+  // Add splits: Payer +shareAmt, Borrower -shareAmt
+  splits.forEach(s => {
+    const payerId = parseInt(s.paid_by);
+    const borrowerId = parseInt(s.user_id);
+    const shareAmt = parseFloat(s.amount || 0);
+
+    if (payerId !== borrowerId) {
+      if (balances[payerId] !== undefined) balances[payerId] += shareAmt;
+      if (balances[borrowerId] !== undefined) balances[borrowerId] -= shareAmt;
+    }
+  });
+
+  // Factor in confirmed cash settlements: Cash Payer +settleAmt, Cash Payee -settleAmt
+  settlements.forEach(s => {
+    if (s.status === 'confirmed' || s.status === 'approved') {
+      const payerId = parseInt(s.payer_id);
+      const payeeId = parseInt(s.payee_id);
+      const settleAmt = parseFloat(s.amount || 0);
+
+      if (balances[payerId] !== undefined) balances[payerId] += settleAmt;
+      if (balances[payeeId] !== undefined) balances[payeeId] -= settleAmt;
+    }
+  });
 
   const memberMap = {};
   members.forEach(m => { memberMap[m.id] = m.name; });
@@ -882,6 +938,48 @@ async function handleAI(req, res) {
     if (creditors[j].amount < 0.5) j++;
   }
 
+  // 3. Budget Advisor Agent
+  const categoryTotals = {};
+  expenses.forEach(e => {
+    const cat = e.category || 'Meal';
+    categoryTotals[cat] = (categoryTotals[cat] || 0) + parseFloat(e.amount);
+  });
+
+  const recommendations = [];
+  if (categoryTotals['Meal'] && categoryTotals['Meal'] > 3000) {
+    recommendations.push({
+      category: 'Food & Meals',
+      icon: '🍲',
+      title: 'Meal Prepping Savings',
+      tip: `Flat spent PKR ${categoryTotals['Meal'].toLocaleString()} on meals. Cooking shared flat dinners saves up to 40% vs food delivery!`
+    });
+  }
+  if (categoryTotals['Utilities'] && categoryTotals['Utilities'] > 2000) {
+    recommendations.push({
+      category: 'Utilities',
+      icon: '⚡',
+      title: 'Peak Hours Energy Conservation',
+      tip: `Utilities total PKR ${categoryTotals['Utilities'].toLocaleString()}. Turn off heavy appliances during peak hours (5 PM - 11 PM) to cut bill.`
+    });
+  }
+  if (categoryTotals['Tea'] && categoryTotals['Tea'] > 1000) {
+    recommendations.push({
+      category: 'Tea & Snacks',
+      icon: '☕',
+      title: 'Flat Tea Corner',
+      tip: `Tea expenses reached PKR ${categoryTotals['Tea'].toLocaleString()}. Making tea inside flat saves ~PKR 2,500/month.`
+    });
+  }
+
+  if (recommendations.length === 0) {
+    recommendations.push({
+      category: 'Smart Budgeting',
+      icon: '🎯',
+      title: 'Weekly Clearance',
+      tip: 'Settle flat balances every Sunday to maintain healthy roommate debt standings.'
+    });
+  }
+
   return res.status(200).json({
     success: true,
     agents: {
@@ -894,10 +992,7 @@ async function handleAI(req, res) {
       },
       budgetAdvisor: {
         agentName: 'Budget Advisor Agent', status: 'Active',
-        recommendations: [
-          { category: 'Food & Meals', icon: '🍲', title: 'Meal Prepping', tip: 'Cooking flat meals together saves up to 40% vs ordering out.' },
-          { category: 'Smart Settlement', icon: '🎯', title: 'Weekly Clearance', tip: 'Use Debt Minimizer every Sunday to settle flat balances.' }
-        ]
+        recommendations
       }
     }
   });

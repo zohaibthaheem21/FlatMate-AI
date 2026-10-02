@@ -18,28 +18,35 @@ export default function AIAdvisor({ setActiveTab, onPrefillExpense }) {
   const [receiptImage, setReceiptImage] = useState(null);
   const [scanning, setScanning] = useState(false);
 
-  useEffect(() => {
-    fetchAgentInsights();
-  }, [flat]);
-
-  const fetchAgentInsights = async () => {
-    if (!flat) return;
-    setLoading(true);
+  const fetchAgentInsights = async (silent = false) => {
+    if (!flat?.id) return;
+    if (!silent && !agentData) setLoading(true);
     try {
       const res = await fetch(`/api/ai?action=multi-agent-insights&flatId=${flat.id}`);
       const data = await res.json();
       if (data.success) {
         setAgentData(data.agents);
-      } else {
+      } else if (!silent) {
         showToast(data.error || 'Failed to fetch AI insights', 'error');
       }
     } catch (err) {
       console.error('AI fetch error:', err);
-      showToast('Could not load AI agents', 'error');
+      if (!silent) showToast('Could not load AI agents', 'error');
     } finally {
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    fetchAgentInsights(false);
+    if (!flat?.id) return;
+
+    const timer = setInterval(() => {
+      fetchAgentInsights(true);
+    }, 8000);
+
+    return () => clearInterval(timer);
+  }, [flat?.id]);
 
   const startVoiceRecognition = () => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
